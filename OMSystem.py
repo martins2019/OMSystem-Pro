@@ -578,4 +578,6 @@ def dashboard():
     return HTMLResponse(content=html_content)
 
 if __name__ == "__main__":
-    uvicorn.run("OMSystem_3:app", host="127.0.0.1", port=8000, reload=True)
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run("OMSystem:app", host="0.0.0.0", port=port)
