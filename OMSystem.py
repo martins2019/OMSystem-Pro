@@ -12,25 +12,13 @@ import sqlite3
 import json
 
 # ==========================================
-# 1. CONFIGURAÇÃO SEGURA DO BANCO DE DADOS
+# 1. CONFIGURAÇÃO EXCLUSIVA DE BANCO LOCAL (SQLITE)
 # ==========================================
-# Lê a variável de ambiente, garantindo fallback seguro para SQLite caso venha vazia ou nula
-raw_db_url = os.getenv("DATABASE_URL", "").strip()
+SQLALCHEMY_DATABASE_URL = "sqlite:///./orion_oms.db"
 
-if not raw_db_url:
-    DATABASE_URL = "sqlite:///./orion_oms.db"
-else:
-    # Correção para o Render/PostgreSQL: SQLAlchemy exige 'postgresql://' em vez de 'postgres://'
-    if raw_db_url.startswith("postgres://"):
-        DATABASE_URL = raw_db_url.replace("postgres://", "postgresql://", 1)
-    else:
-        DATABASE_URL = raw_db_url
-
-if DATABASE_URL.startswith("sqlite"):
-    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-else:
-    engine = create_engine(DATABASE_URL)
-
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -63,38 +51,37 @@ class OrderModel(Base):
 Base.metadata.create_all(bind=engine)
 
 def check_and_migrate_db():
-    if "sqlite" in DATABASE_URL:
-        db_path = "orion_oms.db"
-        if os.path.exists(db_path):
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            
-            try:
-                cursor.execute("SELECT error_message FROM orders LIMIT 1")
-            except sqlite3.OperationalError:
-                cursor.execute("ALTER TABLE orders ADD COLUMN error_message TEXT")
-                print("[MIGRAÇÃO] Coluna 'error_message' adicionada com sucesso!")
+    db_path = "orion_oms.db"
+    if os.path.exists(db_path):
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("SELECT error_message FROM orders LIMIT 1")
+        except sqlite3.OperationalError:
+            cursor.execute("ALTER TABLE orders ADD COLUMN error_message TEXT")
+            print("[MIGRAÇÃO] Coluna 'error_message' adicionada com sucesso!")
 
-            try:
-                cursor.execute("SELECT invested_capital FROM orders LIMIT 1")
-            except sqlite3.OperationalError:
-                cursor.execute("ALTER TABLE orders ADD COLUMN invested_capital FLOAT DEFAULT 0.0")
-                print("[MIGRAÇÃO] Coluna 'invested_capital' adicionada com sucesso!")
+        try:
+            cursor.execute("SELECT invested_capital FROM orders LIMIT 1")
+        except sqlite3.OperationalError:
+            cursor.execute("ALTER TABLE orders ADD COLUMN invested_capital FLOAT DEFAULT 0.0")
+            print("[MIGRAÇÃO] Coluna 'invested_capital' adicionada com sucesso!")
 
-            try:
-                cursor.execute("SELECT fees FROM orders LIMIT 1")
-            except sqlite3.OperationalError:
-                cursor.execute("ALTER TABLE orders ADD COLUMN fees FLOAT DEFAULT 0.0")
-                print("[MIGRAÇÃO] Coluna 'fees' adicionada com sucesso!")
+        try:
+            cursor.execute("SELECT fees FROM orders LIMIT 1")
+        except sqlite3.OperationalError:
+            cursor.execute("ALTER TABLE orders ADD COLUMN fees FLOAT DEFAULT 0.0")
+            print("[MIGRAÇÃO] Coluna 'fees' adicionada com sucesso!")
 
-            conn.commit()
-            conn.close()
+        conn.commit()
+        conn.close()
 
 check_and_migrate_db()
 
 app = FastAPI(
     title="Fenix OMS - Order Management System & ProfitPro Auditor",
-    version="1.8.7"
+    version="1.8.8"
 )
 
 START_TIME = datetime.now()
@@ -261,7 +248,7 @@ def export_backup(db: Session = Depends(get_db)):
             "fees": o.fees,
             "created_at": o.created_at.isoformat() if o.created_at else None
         })
-    return JSONResponse(content={"version": "1.8.7", "exported_at": datetime.now().isoformat(), "orders": data})
+    return JSONResponse(content={"version": "1.8.8", "exported_at": datetime.now().isoformat(), "orders": data})
 
 @app.post("/api/backup/restore")
 async def restore_backup(file: UploadFile = File(...), db: Session = Depends(get_db)):
