@@ -81,7 +81,7 @@ check_and_migrate_db()
 
 app = FastAPI(
     title="Fenix OMS - Order Management System & ProfitPro Auditor",
-    version="1.9.0"
+    version="1.9.1"
 )
 
 START_TIME = datetime.now()
@@ -123,18 +123,21 @@ class OrderPayload(BaseModel):
 def receive_order(payload: OrderPayload, db: Session = Depends(get_db)):
     try:
         raw_ticker = payload.ticker.strip().upper()
+        raw_option = payload.option.strip().upper()
+        raw_status = (payload.status or "FILLED").strip().upper()
         raw_direction = payload.option_type.strip().upper()
 
-        if payload.status == "FILLED":
+        # TRAVA ANTIDUPLICAÇÃO RIGOROSA CORRIGIDA
+        if raw_status == "FILLED":
             existing = db.query(OrderModel).filter(
-                OrderModel.ticker == raw_ticker,
+                ((OrderModel.ticker == raw_ticker) | (OrderModel.option_name == raw_option)),
                 OrderModel.status == "FILLED"
             ).first()
 
             if existing:
                 return {
                     "status": "ignored",
-                    "message": f"Ordem duplicada/bloqueada pelo OMS para o ativo base {raw_ticker}. Já existe posição ativa #{existing.id} ({existing.option_name}).",
+                    "message": f"Ordem duplicada/bloqueada pelo OMS para o ativo {raw_ticker} / opção {raw_option}. Já existe posição ativa #{existing.id} ({existing.option_name}).",
                     "existing_id": existing.id
                 }
 
@@ -146,7 +149,7 @@ def receive_order(payload: OrderPayload, db: Session = Depends(get_db)):
         db_order = OrderModel(
             timestamp=payload.timestamp or datetime.now().isoformat(),
             ticker=raw_ticker,
-            option_name=payload.option.strip().upper(),
+            option_name=raw_option,
             price=payload.price,
             real_price=payload.real_price,
             option_type=raw_direction,
@@ -160,7 +163,7 @@ def receive_order(payload: OrderPayload, db: Session = Depends(get_db)):
             tp_perc=payload.tp_perc,
             analysis=payload.analysis,
             order_type=payload.order_type,
-            status=payload.status,
+            status=raw_status,
             error_message=payload.error_message,
             invested_capital=inv_cap,
             fees=payload.fees
@@ -217,7 +220,7 @@ def reset_database(db: Session = Depends(get_db)):
     return {"status": "success", "message": "Banco de dados limpo com sucesso."}
 
 # ==========================================
-# 3. ROTAS DE BACKUP E RESTAURAÇÃO (CORRIGIDAS PARA DOWNLOAD FORÇADO)
+# 3. ROTAS DE BACKUP E RESTAURAÇÃO
 # ==========================================
 @app.get("/api/backup/export")
 def export_backup(db: Session = Depends(get_db)):
@@ -250,12 +253,11 @@ def export_backup(db: Session = Depends(get_db)):
         })
     
     backup_content = {
-        "version": "1.9.0",
+        "version": "1.9.1",
         "exported_at": datetime.now().isoformat(),
         "orders": data
     }
     
-    # Nome dinâmico do arquivo com data e hora para facilitar a identificação
     filename = f"fenix_oms_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     headers = {"Content-Disposition": f"attachment; filename={filename}"}
     
@@ -273,6 +275,7 @@ async def restore_backup(file: UploadFile = File(...), db: Session = Depends(get
         for item in orders_list:
             exists = db.query(OrderModel).filter(
                 OrderModel.ticker == item.get("ticker"),
+                OrderModel.option_name == item.get("option_name"),
                 OrderModel.timestamp == item.get("timestamp"),
                 OrderModel.status == item.get("status")
             ).first()
@@ -327,7 +330,8 @@ def get_orders(db: Session = Depends(get_db)):
     unique_orders = []
 
     for order in all_orders:
-        key = f"{order.ticker}_{order.status}"
+        # Chave corrigida incluindo option_name para evitar ocultar opções distintas do mesmo ativo base
+        key = f"{order.ticker}_{order.option_name}_{order.status}"
         if key not in seen_keys:
             seen_keys.add(key)
             unique_orders.append(order)
