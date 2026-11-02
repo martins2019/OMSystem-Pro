@@ -12,9 +12,13 @@ import sqlite3
 import json
 
 # ==========================================
-# 1. CONFIGURAÇÃO DO BANCO DE DADOS (SUPORTE A RENDER / EXTERNO OU SQLITE)
+# 1. CONFIGURAÇÃO DO BANCO DE DADOS (CORRIGIDO PARA RENDER / POSTGRESQL / SQLITE)
 # ==========================================
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./orion_oms.db")
+
+# Correção automática para o Render: SQLAlchemy exige 'postgresql://' em vez de 'postgres://'
+if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 if DATABASE_URL.startswith("sqlite"):
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -84,7 +88,7 @@ check_and_migrate_db()
 
 app = FastAPI(
     title="Fenix OMS - Order Management System & ProfitPro Auditor",
-    version="1.8.5"
+    version="1.8.6"
 )
 
 START_TIME = datetime.now()
@@ -220,7 +224,7 @@ def reset_database(db: Session = Depends(get_db)):
     return {"status": "success", "message": "Banco de dados limpo com sucesso."}
 
 # ==========================================
-# 3. ROTAS DE BACKUP E RESTAURAÇÃO (CORRIGIDAS)
+# 3. ROTAS DE BACKUP E RESTAURAÇÃO
 # ==========================================
 @app.get("/api/backup/export")
 def export_backup(db: Session = Depends(get_db)):
@@ -251,7 +255,7 @@ def export_backup(db: Session = Depends(get_db)):
             "fees": o.fees,
             "created_at": o.created_at.isoformat() if o.created_at else None
         })
-    return JSONResponse(content={"version": "1.8.5", "exported_at": datetime.now().isoformat(), "orders": data})
+    return JSONResponse(content={"version": "1.8.6", "exported_at": datetime.now().isoformat(), "orders": data})
 
 @app.post("/api/backup/restore")
 async def restore_backup(file: UploadFile = File(...), db: Session = Depends(get_db)):
@@ -263,7 +267,6 @@ async def restore_backup(file: UploadFile = File(...), db: Session = Depends(get
         
         restored_count = 0
         for item in orders_list:
-            # Correção aplicada: verificação limpa de duplicidade sem quebra de sintaxe
             exists = db.query(OrderModel).filter(
                 OrderModel.ticker == item.get("ticker"),
                 OrderModel.timestamp == item.get("timestamp"),
