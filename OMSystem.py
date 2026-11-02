@@ -81,7 +81,7 @@ check_and_migrate_db()
 
 app = FastAPI(
     title="Fenix OMS - Order Management System & ProfitPro Auditor",
-    version="1.8.8"
+    version="1.8.9"
 )
 
 START_TIME = datetime.now()
@@ -248,7 +248,7 @@ def export_backup(db: Session = Depends(get_db)):
             "fees": o.fees,
             "created_at": o.created_at.isoformat() if o.created_at else None
         })
-    return JSONResponse(content={"version": "1.8.8", "exported_at": datetime.now().isoformat(), "orders": data})
+    return JSONResponse(content={"version": "1.8.9", "exported_at": datetime.now().isoformat(), "orders": data})
 
 @app.post("/api/backup/restore")
 async def restore_backup(file: UploadFile = File(...), db: Session = Depends(get_db)):
