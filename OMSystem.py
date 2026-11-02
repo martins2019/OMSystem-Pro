@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
-from fastapi import FastAPI, Depends, HTTPException, Request, UploadFile, File
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi import FastAPI, Depends, HTTPException, Request
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from sqlalchemy import Column, DateTime, Float, Integer, String, create_engine
 from sqlalchemy.ext.declarative import declarative_base
@@ -9,20 +9,15 @@ from sqlalchemy.orm import Session, sessionmaker
 import uvicorn
 import os
 import sqlite3
-import json
 
 # ==========================================
-# 1. CONFIGURAÇÃO DO BANCO DE DADOS (SUPORTE A RENDER / EXTERNO OU SQLITE)
+# 1. CONFIGURAÇÃO DO BANCO DE DADOS (SQLITE)
 # ==========================================
-# Se houver uma DATABASE_URL configurada no Render (ex: PostgreSQL), usará ela. 
-# Caso contrário, utiliza SQLite local com persistência resiliente.
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./orion_oms.db")
+SQLALCHEMY_DATABASE_URL = "sqlite:///./orion_oms.db"
 
-if DATABASE_URL.startswith("sqlite"):
-    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
-else:
-    engine = create_engine(DATABASE_URL)
-
+engine = create_engine(
+    SQLALCHEMY_DATABASE_URL, connect_args={"check_same_thread": False}
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -47,46 +42,45 @@ class OrderModel(Base):
     analysis = Column(String)
     order_type = Column(String)
     status = Column(String, default="FILLED") # PENDING, FILLED, REJECTED, CLOSED
-    error_message = Column(String, nullable=True) 
-    invested_capital = Column(Float, default=0.0) 
-    fees = Column(Float, default=0.0) 
+    error_message = Column(String, nullable=True) # Motivo da rejeição, duplicidade ou erro
+    invested_capital = Column(Float, default=0.0) # Capital investido calculado (Lotes * Preço)
+    fees = Column(Float, default=0.0) # Taxas operacionais estimadas
     created_at = Column(DateTime, default=datetime.now)
 
 Base.metadata.create_all(bind=engine)
 
 def check_and_migrate_db():
-    if "sqlite" in DATABASE_URL:
-        db_path = "orion_oms.db"
-        if os.path.exists(db_path):
-            conn = sqlite3.connect(db_path)
-            cursor = conn.cursor()
-            
-            try:
-                cursor.execute("SELECT error_message FROM orders LIMIT 1")
-            except sqlite3.OperationalError:
-                cursor.execute("ALTER TABLE orders ADD COLUMN error_message TEXT")
-                print("[MIGRAÇÃO] Coluna 'error_message' adicionada com sucesso!")
+    db_path = "orion_oms.db"
+    if os.path.exists(db_path):
+        conn = sqlite3.connect(db_path)
+        cursor = conn.cursor()
+        
+        try:
+            cursor.execute("SELECT error_message FROM orders LIMIT 1")
+        except sqlite3.OperationalError:
+            cursor.execute("ALTER TABLE orders ADD COLUMN error_message TEXT")
+            print("[MIGRAÇÃO] Coluna 'error_message' adicionada com sucesso!")
 
-            try:
-                cursor.execute("SELECT invested_capital FROM orders LIMIT 1")
-            except sqlite3.OperationalError:
-                cursor.execute("ALTER TABLE orders ADD COLUMN invested_capital FLOAT DEFAULT 0.0")
-                print("[MIGRAÇÃO] Coluna 'invested_capital' adicionada com sucesso!")
+        try:
+            cursor.execute("SELECT invested_capital FROM orders LIMIT 1")
+        except sqlite3.OperationalError:
+            cursor.execute("ALTER TABLE orders ADD COLUMN invested_capital FLOAT DEFAULT 0.0")
+            print("[MIGRAÇÃO] Coluna 'invested_capital' adicionada com sucesso!")
 
-            try:
-                cursor.execute("SELECT fees FROM orders LIMIT 1")
-            except sqlite3.OperationalError:
-                cursor.execute("ALTER TABLE orders ADD COLUMN fees FLOAT DEFAULT 0.0")
-                print("[MIGRAÇÃO] Coluna 'fees' adicionada com sucesso!")
+        try:
+            cursor.execute("SELECT fees FROM orders LIMIT 1")
+        except sqlite3.OperationalError:
+            cursor.execute("ALTER TABLE orders ADD COLUMN fees FLOAT DEFAULT 0.0")
+            print("[MIGRAÇÃO] Coluna 'fees' adicionada com sucesso!")
 
-            conn.commit()
-            conn.close()
+        conn.commit()
+        conn.close()
 
 check_and_migrate_db()
 
 app = FastAPI(
     title="Fenix OMS - Order Management System & ProfitPro Auditor",
-    version="1.8.4"
+    version="1.8.3"
 )
 
 START_TIME = datetime.now()
@@ -122,7 +116,7 @@ class OrderPayload(BaseModel):
     fees: Optional[float] = 0.0
 
 # ==========================================
-# 2. ENDPOINTS DE WEBHOOK E GESTÃO DE DADOS
+# 2. ENDPOINT DE WEBHOOK COM ANTI-DUPLICIDADE RIGOROSO
 # ==========================================
 @app.post("/webhook/order")
 def receive_order(payload: OrderPayload, db: Session = Depends(get_db)):
@@ -130,6 +124,7 @@ def receive_order(payload: OrderPayload, db: Session = Depends(get_db)):
         raw_ticker = payload.ticker.strip().upper()
         raw_direction = payload.option_type.strip().upper()
 
+        # BLOQUEIO ANTI-DUPLICIDADE NO OMS POR ATIVO BASE (EX: WEGE)
         if payload.status == "FILLED":
             existing = db.query(OrderModel).filter(
                 OrderModel.ticker == raw_ticker,
@@ -222,98 +217,7 @@ def reset_database(db: Session = Depends(get_db)):
     return {"status": "success", "message": "Banco de dados limpo com sucesso."}
 
 # ==========================================
-# 3. ROTAS DE BACKUP E RESTAURAÇÃO (RESOLVE O PROBLEMA DO RENDER)
-# ==========================================
-@app.get("/api/backup/export")
-def export_backup(db: Session = Depends(get_db)):
-    """Exporta todos os registros do banco em formato JSON para backup seguro."""
-    orders = db.query(OrderModel).all()
-    data = []
-    for o in orders:
-        data.append({
-            "timestamp": o.timestamp,
-            "ticker": o.ticker,
-            "option_name": o.option_name,
-            "price": o.price,
-            "real_price": o.real_price,
-            "option_type": o.option_type,
-            "strike": o.strike,
-            "spot_price": o.spot_price,
-            "direction": o.direction,
-            "action": o.action,
-            "magic": o.magic,
-            "lots": o.lots,
-            "sl_perc": o.sl_perc,
-            "tp_perc": o.tp_perc,
-            "analysis": o.analysis,
-            "order_type": o.order_type,
-            "status": o.status,
-            "error_message": o.error_message,
-            "invested_capital": o.invested_capital,
-            "fees": o.fees,
-            "created_at": o.created_at.isoformat() if o.created_at else None
-        })
-    return JSONResponse(content={"version": "1.8.4", "exported_at": datetime.now().isoformat(), "orders": data})
-
-@app.post("/api/backup/restore")
-async def restore_backup(file: UploadFile = File(...), db: Session = Depends(get_db)):
-    """Restaura o banco de dados através de um arquivo JSON de backup enviado."""
-    try:
-        content = await file.read()
-        backup_data = json.loads(content.decode("utf-8"))
-        orders_list = backup_data.get("orders", [])
-        
-        restored_count = 0
-        for item in orders_list:
-            # Evita duplicatas exatas baseadas no ticker, timestamp e status
-            exists = db.query(OrderModel).filter(
-                OrderModel.ticker == item.get("ticker"),
-                OrderModel.timestamp == item.get("timestamp"),
-                OrderModel.status == item.get("status")
-            ).first()
-
-            if not exists:
-                dt_created = datetime.now()
-                if item.get("created_at"):
-                    try:
-                        dt_created = datetime.fromisoformat(item.get("created_at"))
-                    except:
-                        pass
-
-                new_order = OrderModel(
-                    timestamp=item.get("timestamp"),
-                    ticker=item.get("ticker"),
-                    option_name=item.get("option_name"),
-                    price=item.get("price"),
-                    real_price=item.get("real_price"),
-                    option_type=item.get("option_type"),
-                    strike=item.get("strike"),
-                    spot_price=item.get("spot_price"),
-                    direction=item.get("direction"),
-                    action=item.get("action"),
-                    magic=item.get("magic"),
-                    lots=item.get("lots"),
-                    sl_perc=item.get("sl_perc"),
-                    tp_perc=item.get("tp_perc"),
-                    analysis=item.get("analysis"),
-                    order_type=item.get("order_type"),
-                    status=item.get("status", "FILLED"),
-                    error_message=item.get("error_message"),
-                    invested_capital=item.get("invested_capital", 0.0),
-                    fees=item.get("fees", 0.0),
-                    created_at=dt_created
-                )
-                db.add(new_order)
-                restored_count += 1
-
-        db.commit()
-        return {"status": "success", "message": f"Backup restaurado com sucesso! {restored_count} ordens importadas."}
-    except Exception as e:
-        db.rollback()
-        raise HTTPException(status_code=400, detail=f"Erro ao processar arquivo de backup: {str(e)}")
-
-# ==========================================
-# 4. APIs DE CONSULTA E STATUS DA CONTA
+# 3. APIs DE CONSULTA E STATUS DA CONTA
 # ==========================================
 @app.get("/api/orders")
 def get_orders(db: Session = Depends(get_db)):
@@ -340,6 +244,7 @@ def get_account_status(db: Session = Depends(get_db)):
     total_invested = sum([o.invested_capital for o in filled_orders])
     total_fees = sum([o.fees for o in filled_orders])
 
+    # Cálculos simulados de PnL Aberto
     lucro_aberto = 0.0
     perda_aberta = 0.0
     saldo_aberto = lucro_aberto + perda_aberta
@@ -361,7 +266,7 @@ def get_account_status(db: Session = Depends(get_db)):
     }
 
 # ==========================================
-# 5. DASHBOARD WEB EM TEMPO REAL
+# 4. DASHBOARD WEB EM TEMPO REAL
 # ==========================================
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
@@ -373,6 +278,7 @@ def dashboard():
         <title>FENIX OMS - Painel de Auditoria & Execução ProfitPro (Conta 70960268)</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <script>
+            // Cálculo da 3ª Sexta-Feira do Mês no Formato Brasileiro (DD/MM/YYYY)
             function obterDataVencimentoBr(tickerOpcao, dataCriacaoIso) {
                 if (!tickerOpcao || tickerOpcao.length < 5) return "--/--/----";
                 
@@ -389,7 +295,7 @@ def dashboard():
 
                 const dtCriacao = dataCriacaoIso ? new Date(dataCriacaoIso) : new Date();
                 let ano = dtCriacao.getFullYear();
-                let mes = mesIndex;
+                let mes = mesIndex; // 0-based index
 
                 if (mes < dtCriacao.getMonth()) {
                     ano += 1;
@@ -438,12 +344,14 @@ def dashboard():
                     document.getElementById('stat-filled').innerText = orders.filter(o => o.status === 'FILLED').length;
                     document.getElementById('stat-rejected').innerText = orders.filter(o => o.status === 'REJECTED').length;
 
+                    // Cálculo dinâmico das posições em aberto no OMS
                     let lucroAbertoTotal = 0.0;
                     let perdaAbertaTotal = 0.0;
 
                     orders.forEach(o => {
                         if (o.status === 'FILLED') {
-                            let pnlOp = 0.0;
+                            // PnL acumulado
+                            let pnlOp = 0.0; // Atualizável via feed de cotações em tempo real
                             if (pnlOp > 0) lucroAbertoTotal += pnlOp;
                             else perdaAbertaTotal += pnlOp;
                         }
@@ -468,7 +376,15 @@ def dashboard():
                     }
 
                     orders.forEach(o => {
+                        let badgeColor = 'bg-green-500/20 text-green-400 border-green-500/30';
+                        if (o.status === 'REJECTED') {
+                            badgeColor = 'bg-red-500/20 text-red-400 border-red-500/30';
+                        } else if (o.status === 'CLOSED') {
+                            badgeColor = 'bg-gray-500/20 text-gray-400 border-gray-500/30';
+                        }
+                        
                         let dirColor = o.option_type === 'CALL' ? 'text-blue-400' : 'text-purple-400';
+
                         let dataCompra = new Date(o.created_at).toLocaleString('pt-BR', {day: '2-digit', month: '2-digit', hour: '2-digit', minute:'2-digit'});
                         let dataVencimentoBr = obterDataVencimentoBr(o.option_name, o.created_at);
                         let investedVal = o.invested_capital || (o.lots * o.real_price);
@@ -505,62 +421,42 @@ def dashboard():
                 if (!confirm(`Deseja realmente encerrar manualmente a ordem #${id} no ProfitPro (Conta 70960268)?`)) return;
                 try {
                     const res = await fetch(`/api/orders/${id}/close`, { method: 'POST' });
-                    if (res.ok) fetchOMSData();
-                    else alert('Erro ao fechar operação.');
-                } catch (e) { alert('Erro de conexão com o servidor OMS.'); }
+                    if (res.ok) {
+                        fetchOMSData();
+                    } else {
+                        alert('Erro ao fechar operação.');
+                    }
+                } catch (e) {
+                    alert('Erro de conexão com o servidor OMS.');
+                }
             }
 
             async function fecharTodasPosicoes() {
                 if (!confirm('Deseja realmente ENCERRAR TODAS AS POSIÇÕES ABERTAS na Conta 70960268?')) return;
                 try {
                     const res = await fetch('/api/orders/close-all', { method: 'POST' });
-                    if (res.ok) fetchOMSData();
-                    else alert('Erro ao encerrar todas as posições.');
-                } catch (e) { alert('Erro de conexão com o servidor OMS.'); }
+                    if (res.ok) {
+                        fetchOMSData();
+                    } else {
+                        alert('Erro ao encerrar todas as posições.');
+                    }
+                } catch (e) {
+                    alert('Erro de conexão com o servidor OMS.');
+                }
             }
 
             async function limparBanco() {
                 if (!confirm('Deseja realmente apagar todo o histórico do banco de dados local OMS?')) return;
                 try {
                     const res = await fetch('/api/orders/reset-db', { method: 'POST' });
-                    if (res.ok) fetchOMSData();
-                    else alert('Erro ao limpar banco.');
-                } catch (e) { alert('Erro de conexão.'); }
-            }
-
-            // Funções para Backup e Restauração
-            function baixarBackup() {
-                window.location.href = '/api/backup/export';
-            }
-
-            async function restaurarBackup(event) {
-                const file = event.target.files[0];
-                if (!file) return;
-
-                if (!confirm(`Deseja restaurar o banco de dados com o arquivo "${file.name}"?`)) {
-                    event.target.value = '';
-                    return;
-                }
-
-                const formData = new FormData();
-                formData.append('file', file);
-
-                try {
-                    const res = await fetch('/api/backup/restore', {
-                        method: 'POST',
-                        body: formData
-                    });
-                    const result = await res.json();
                     if (res.ok) {
-                        alert(result.message);
                         fetchOMSData();
                     } else {
-                        alert('Erro ao restaurar backup: ' + (result.detail || 'Erro desconhecido'));
+                        alert('Erro ao limpar banco.');
                     }
                 } catch (e) {
-                    alert('Erro de conexão ao enviar arquivo de backup.');
+                    alert('Erro de conexão.');
                 }
-                event.target.value = '';
             }
             
             setInterval(fetchOMSData, 3000);
@@ -573,26 +469,19 @@ def dashboard():
             <div class="flex justify-between items-center mb-6 border-b border-gray-800 pb-4">
                 <div>
                     <h1 class="text-2xl font-black tracking-wider text-blue-500 font-mono">FENIX PRO <span class="text-xs px-2 py-0.5 rounded bg-blue-900/40 text-blue-300 border border-blue-700/50">PROFITPRO OMS (70960268)</span></h1>
-                    <p class="text-xs text-gray-400 mt-1">Plataforma de Auditoria, Conexão ProfitPro, Rejeições e Backup Antirresgate do Render</p>
+                    <p class="text-xs text-gray-400 mt-1">Plataforma de Auditoria, Conexão ProfitPro, Rejeições e Fechamento Manual de Posições</p>
                 </div>
-                <div class="flex items-center gap-2 flex-wrap justify-end">
-                    <!-- Botões de Backup & Restauração -->
-                    <button onclick="baixarBackup()" class="bg-emerald-600 hover:bg-emerald-700 text-white font-bold px-3 py-1 rounded text-xs border border-emerald-500 shadow transition flex items-center gap-1">📥 Baixar Backup</button>
-                    <label class="bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-3 py-1 rounded text-xs border border-indigo-500 shadow transition cursor-pointer flex items-center gap-1">
-                        📤 Restaurar Backup
-                        <input type="file" accept=".json" onchange="restaurarBackup(event)" class="hidden">
-                    </label>
-
-                    <button onclick="fecharTodasPosicoes()" class="bg-red-600 hover:bg-red-700 text-white font-bold px-3 py-1 rounded text-xs border border-red-500 shadow transition">🚨 Fechar posições</button>
-                    <button onclick="limparBanco()" class="bg-gray-800 hover:bg-gray-700 text-gray-300 px-3 py-1 rounded text-xs border border-gray-700 transition">🧹 Limpar</button>
-                    <div class="flex items-center gap-2 ml-2">
+                <div class="flex items-center gap-3">
+                    <button onclick="fecharTodasPosicoes()" class="bg-red-600 hover:bg-red-700 text-white font-bold px-3 py-1 rounded text-xs border border-red-500 shadow transition">🚨 Fechar todas as posições</button>
+                    <button onclick="limparBanco()" class="bg-gray-800 hover:bg-gray-700 text-gray-300 px-3 py-1 rounded text-xs border border-gray-700 transition">🧹 Limpar Banco</button>
+                    <div class="flex items-center gap-2">
                         <span class="w-3 h-3 rounded-full bg-green-500 animate-ping"></span>
-                        <span class="text-xs text-green-400 font-bold">ONLINE</span>
+                        <span class="text-xs text-green-400 font-bold">OMS PROFITPRO ONLINE</span>
                     </div>
                 </div>
             </div>
 
-            <!-- CARDS DE CONTA E MÉTRICAS -->
+            <!-- CARDS DE CONTA E MÉTRICAS (GRID ADAPTADA DE 5 COLUNAS NA MESMA LINHA) -->
             <div class="grid grid-cols-1 md:grid-cols-5 gap-3 mb-6">
                 <div class="bg-gray-900 border border-blue-500/40 p-4 rounded-xl shadow-lg relative overflow-hidden">
                     <div class="absolute top-0 right-0 bg-blue-500/10 text-blue-400 text-[10px] px-2 py-1 rounded-bl font-mono">CONTA PROFITPRO</div>
