@@ -81,7 +81,7 @@ check_and_migrate_db()
 
 app = FastAPI(
     title="Fenix OMS - Order Management System & ProfitPro Auditor",
-    version="1.8.9"
+    version="1.9.0"
 )
 
 START_TIME = datetime.now()
@@ -217,11 +217,11 @@ def reset_database(db: Session = Depends(get_db)):
     return {"status": "success", "message": "Banco de dados limpo com sucesso."}
 
 # ==========================================
-# 3. ROTAS DE BACKUP E RESTAURAÇÃO
+# 3. ROTAS DE BACKUP E RESTAURAÇÃO (CORRIGIDAS PARA DOWNLOAD FORÇADO)
 # ==========================================
 @app.get("/api/backup/export")
 def export_backup(db: Session = Depends(get_db)):
-    """Exporta todos os registros do banco em formato JSON para backup seguro."""
+    """Exporta todos os registros do banco em formato JSON forçando o download do arquivo."""
     orders = db.query(OrderModel).all()
     data = []
     for o in orders:
@@ -248,7 +248,18 @@ def export_backup(db: Session = Depends(get_db)):
             "fees": o.fees,
             "created_at": o.created_at.isoformat() if o.created_at else None
         })
-    return JSONResponse(content={"version": "1.8.9", "exported_at": datetime.now().isoformat(), "orders": data})
+    
+    backup_content = {
+        "version": "1.9.0",
+        "exported_at": datetime.now().isoformat(),
+        "orders": data
+    }
+    
+    # Nome dinâmico do arquivo com data e hora para facilitar a identificação
+    filename = f"fenix_oms_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    headers = {"Content-Disposition": f"attachment; filename={filename}"}
+    
+    return JSONResponse(content=backup_content, headers=headers)
 
 @app.post("/api/backup/restore")
 async def restore_backup(file: UploadFile = File(...), db: Session = Depends(get_db)):
