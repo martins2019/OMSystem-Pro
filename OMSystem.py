@@ -12,13 +12,19 @@ import sqlite3
 import json
 
 # ==========================================
-# 1. CONFIGURAÇÃO DO BANCO DE DADOS (CORRIGIDO PARA RENDER / POSTGRESQL / SQLITE)
+# 1. CONFIGURAÇÃO SEGURA DO BANCO DE DADOS
 # ==========================================
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./orion_oms.db")
+# Lê a variável de ambiente, garantindo fallback seguro para SQLite caso venha vazia ou nula
+raw_db_url = os.getenv("DATABASE_URL", "").strip()
 
-# Correção automática para o Render: SQLAlchemy exige 'postgresql://' em vez de 'postgres://'
-if DATABASE_URL and DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+if not raw_db_url:
+    DATABASE_URL = "sqlite:///./orion_oms.db"
+else:
+    # Correção para o Render/PostgreSQL: SQLAlchemy exige 'postgresql://' em vez de 'postgres://'
+    if raw_db_url.startswith("postgres://"):
+        DATABASE_URL = raw_db_url.replace("postgres://", "postgresql://", 1)
+    else:
+        DATABASE_URL = raw_db_url
 
 if DATABASE_URL.startswith("sqlite"):
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
@@ -88,7 +94,7 @@ check_and_migrate_db()
 
 app = FastAPI(
     title="Fenix OMS - Order Management System & ProfitPro Auditor",
-    version="1.8.6"
+    version="1.8.7"
 )
 
 START_TIME = datetime.now()
@@ -255,7 +261,7 @@ def export_backup(db: Session = Depends(get_db)):
             "fees": o.fees,
             "created_at": o.created_at.isoformat() if o.created_at else None
         })
-    return JSONResponse(content={"version": "1.8.6", "exported_at": datetime.now().isoformat(), "orders": data})
+    return JSONResponse(content={"version": "1.8.7", "exported_at": datetime.now().isoformat(), "orders": data})
 
 @app.post("/api/backup/restore")
 async def restore_backup(file: UploadFile = File(...), db: Session = Depends(get_db)):
