@@ -13,7 +13,7 @@ import sqlite3
 import json
 
 # ==========================================
-# 1. BANCO DE DADOS LOCAL E MIGRAÇÃO AUTOMÁTICA
+# 1. BANCO DE DADOS E MIGRAÇÃO AUTOMÁTICA
 # ==========================================
 SQLALCHEMY_DATABASE_URL = "sqlite:///./orion_oms.db"
 
@@ -62,7 +62,7 @@ def check_and_migrate_db():
     if os.path.exists(db_path):
         conn = sqlite3.connect(db_path)
         cursor = conn.cursor()
-        colunas_necessarias = {
+        colunas = {
             "error_message": "TEXT",
             "invested_capital": "FLOAT DEFAULT 0.0",
             "fees": "FLOAT DEFAULT 0.0",
@@ -73,24 +73,20 @@ def check_and_migrate_db():
             "account_id": "TEXT DEFAULT '70960268'",
             "closed_at": "TIMESTAMP"
         }
-        for col, tipo in colunas_necessarias.items():
+        for col, tipo in colunas.items():
             try:
                 cursor.execute(f"SELECT {col} FROM orders LIMIT 1")
             except sqlite3.OperationalError:
                 cursor.execute(f"ALTER TABLE orders ADD COLUMN {col} {tipo}")
-                print(f"[MIGRAÇÃO] Coluna '{col}' adicionada com sucesso!")
         conn.commit()
         conn.close()
 
 check_and_migrate_db()
 
 # ==========================================
-# 2. INICIALIZAÇÃO DA API FASTAPI
+# 2. INICIALIZAÇÃO FASTAPI & CORS
 # ==========================================
-app = FastAPI(
-    title="FENIX ENTERPRISE OMS - ProfitPro Engine",
-    version="2.0.0"
-)
+app = FastAPI(title="FENIX ENTERPRISE OMS - ProfitPro Engine", version="2.1.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -143,7 +139,7 @@ class MarketUpdatePayload(BaseModel):
     quotes: List[MarketPriceUpdateItem]
 
 # ==========================================
-# 3. ENDPOINTS DE RECEPÇÃO E GESTÃO DE ORDENS
+# 3. ENDPOINTS DE RECEPÇÃO E EXECUÇÃO
 # ==========================================
 @app.post("/webhook/order")
 def receive_order(payload: OrderPayload, db: Session = Depends(get_db)):
@@ -160,7 +156,7 @@ def receive_order(payload: OrderPayload, db: Session = Depends(get_db)):
         preco_exec = payload.real_price if (payload.real_price and payload.real_price > 0) else payload.price
         inv_cap = payload.invested_capital if (payload.invested_capital and payload.invested_capital > 0) else (lote * preco_exec)
 
-        # 1. Se for comando ou confirmação de encerramento remoto
+        # Se for comando de fechamento do robô
         if raw_action in ("EXIT_REQUESTED", "CLOSE", "CLOSED", "EXIT") or raw_status in ("CLOSED", "EXIT_REQUESTED"):
             pos_existente = db.query(OrderModel).filter(
                 OrderModel.option_name == raw_option,
@@ -179,7 +175,7 @@ def receive_order(payload: OrderPayload, db: Session = Depends(get_db)):
                 db.commit()
                 return {"status": "success", "message": f"Posição {raw_option} marcada como ENCERRADA.", "order_id": pos_existente.id}
 
-        # 2. Se for atualização de ordem existente para FILLED
+        # Atualização de SUBMITTED para FILLED
         ordem_existente = db.query(OrderModel).filter(
             OrderModel.option_name == raw_option,
             OrderModel.status == "SUBMITTED"
@@ -193,7 +189,7 @@ def receive_order(payload: OrderPayload, db: Session = Depends(get_db)):
             db.commit()
             return {"status": "success", "message": f"Ordem {raw_option} atualizada para FILLED.", "order_id": ordem_existente.id}
 
-        # 3. Trava de Duplicação Estrita para Posições Abertas
+        # Trava de duplicação para posições abertas
         if raw_status in ("FILLED", "SUBMITTED"):
             em_aberto = db.query(OrderModel).filter(
                 OrderModel.option_name == raw_option,
@@ -202,7 +198,7 @@ def receive_order(payload: OrderPayload, db: Session = Depends(get_db)):
             if em_aberto:
                 return {"status": "ignored", "message": f"Posição ativa #{em_aberto.id} já existe para {raw_option}."}
 
-        # 4. Criar Novo Registro
+        # Novo registro
         db_order = OrderModel(
             timestamp=payload.timestamp or datetime.now().isoformat(),
             ticker=raw_ticker,
@@ -238,7 +234,7 @@ def receive_order(payload: OrderPayload, db: Session = Depends(get_db)):
 
 @app.post("/webhook/market-update")
 def update_market_quotes(payload: MarketUpdatePayload, db: Session = Depends(get_db)):
-    """Atualiza o preço atual de mercado (Mark-to-Market) de todas as opções ativas."""
+    """Atualização contínua de cotações a mercado."""
     updated = 0
     for item in payload.quotes:
         pos = db.query(OrderModel).filter(
@@ -255,10 +251,9 @@ def update_market_quotes(payload: MarketUpdatePayload, db: Session = Depends(get
 
 @app.get("/api/commands/pending")
 def get_pending_commands(db: Session = Depends(get_db)):
-    """Rota consumida pelo robô para saber se o cliente pediu para fechar ordens pelo OMS."""
-    pedidos_fechamento = db.query(OrderModel).filter(OrderModel.status == "CLOSE_REQUESTED").all()
-    comandos = [{"order_id": o.id, "option": o.option_name, "action": "CLOSE", "volume": o.lots} for o in pedidos_fechamento]
-    return comandos
+    """Comandos consumidos pelos robôs executores."""
+    pedidos = db.query(OrderModel).filter(OrderModel.status == "CLOSE_REQUESTED").all()
+    return [{"order_id": o.id, "option": o.option_name, "action": "CLOSE", "volume": o.lots} for o in pedidos]
 
 @app.post("/api/orders/{order_id}/close")
 def close_order_web(order_id: int, db: Session = Depends(get_db)):
@@ -268,7 +263,7 @@ def close_order_web(order_id: int, db: Session = Depends(get_db)):
     order.status = "CLOSE_REQUESTED"
     order.error_message = "Solicitação de zeragem manual via Fenix OMS Web"
     db.commit()
-    return {"status": "success", "message": f"Solicitação de zeragem para #{order_id} enviada ao robô."}
+    return {"status": "success", "message": f"Comando de zeragem enviado para #{order_id}."}
 
 @app.post("/api/orders/close-all")
 def close_all_orders_web(db: Session = Depends(get_db)):
@@ -284,15 +279,14 @@ def close_all_orders_web(db: Session = Depends(get_db)):
 def reset_database(db: Session = Depends(get_db)):
     db.query(OrderModel).delete()
     db.commit()
-    return {"status": "success", "message": "Histórico do banco de dados zerado com sucesso."}
+    return {"status": "success", "message": "Banco de dados limpo com sucesso."}
 
 # ==========================================
-# 4. CONSULTAS E MÉTRICAS DA CONTA
+# 4. CONSULTAS E STATUS DA CONTA
 # ==========================================
 @app.get("/api/orders")
 def get_orders(db: Session = Depends(get_db)):
-    orders = db.query(OrderModel).order_by(desc(OrderModel.id)).limit(150).all()
-    return orders
+    return db.query(OrderModel).order_by(desc(OrderModel.id)).limit(150).all()
 
 @app.get("/api/account-status")
 def get_account_status(db: Session = Depends(get_db)):
@@ -307,6 +301,7 @@ def get_account_status(db: Session = Depends(get_db)):
     lucro_aberto = sum(o.pnl_brl for o in abertas if o.pnl_brl > 0)
     perda_aberta = sum(o.pnl_brl for o in abertas if o.pnl_brl < 0)
     saldo_aberto = lucro_aberto + perda_aberta
+    pnl_aberto_perc = ((saldo_aberto / total_investido) * 100.0) if total_investido > 0 else 0.0
 
     lucro_fechado = sum(o.pnl_brl for o in fechadas)
     win_trades = len([o for o in fechadas if o.pnl_brl > 0])
@@ -319,11 +314,11 @@ def get_account_status(db: Session = Depends(get_db)):
         "account_id": os.getenv("FENIX_ACCOUNT", "70960268"),
         "broker": "Nelogica ProfitPro (B3 Engine)",
         "equity": equity_total,
-        "available_margin": max(0.0, equity_total - total_investado_capital if (total_investado_capital := total_investido) else equity_total),
         "total_invested": total_investido,
         "lucro_aberto": lucro_aberto,
         "perda_aberta": perda_aberta,
         "saldo_aberto": saldo_aberto,
+        "pnl_aberto_perc": pnl_aberto_perc,
         "lucro_fechado": lucro_fechado,
         "win_rate": win_rate,
         "total_active": len(abertas),
@@ -334,7 +329,7 @@ def get_account_status(db: Session = Depends(get_db)):
     }
 
 # ==========================================
-# 5. ROTAS DE BACKUP E EXPORTAÇÃO
+# 5. ROTAS DE BACKUP
 # ==========================================
 @app.get("/api/backup/export")
 def export_backup(db: Session = Depends(get_db)):
@@ -351,7 +346,7 @@ def export_backup(db: Session = Depends(get_db)):
         "created_at": o.created_at.isoformat() if o.created_at else None
     } for o in orders]
 
-    content = {"version": "2.0.0", "exported_at": datetime.now().isoformat(), "orders": data}
+    content = {"version": "2.1.0", "exported_at": datetime.now().isoformat(), "orders": data}
     filename = f"fenix_oms_backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     return JSONResponse(content=content, headers={"Content-Disposition": f"attachment; filename={filename}"})
 
@@ -385,7 +380,7 @@ async def restore_backup(file: UploadFile = File(...), db: Session = Depends(get
         raise HTTPException(status_code=400, detail=str(e))
 
 # ==========================================
-# 6. DASHBOARD PROFISSIONAL INTEGRADO (HTML5 + TAILWIND)
+# 6. DASHBOARD INSTITUCIONAL COM TOTALIZADOR E SUPORTE À DECISÃO
 # ==========================================
 @app.get("/", response_class=HTMLResponse)
 def dashboard():
@@ -395,16 +390,19 @@ def dashboard():
     <head>
         <meta charset="UTF-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>FENIX OMS - Institutional Portfolio & Execution Manager</title>
+        <title>FENIX OMS - Institutional Portfolio & Risk Execution</title>
         <script src="https://cdn.tailwindcss.com"></script>
         <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
         <script>
             let currentTab = 'active';
+            let globalActiveOrders = [];
+            let currentAccountData = {};
 
             async function loadOMSData() {
                 try {
                     const resAcc = await fetch('/api/account-status');
                     const acc = await resAcc.json();
+                    currentAccountData = acc;
 
                     document.getElementById('acc-id').innerText = acc.account_id;
                     document.getElementById('acc-equity').innerText = 'R$ ' + acc.equity.toLocaleString('pt-BR', {minimumFractionDigits: 2});
@@ -413,12 +411,36 @@ def dashboard():
                     document.getElementById('acc-winrate').innerText = acc.win_rate.toFixed(1) + '%';
                     document.getElementById('acc-uptime').innerText = acc.uptime;
 
+                    // Saldo no Card Principal
                     const elSaldo = document.getElementById('stat-saldo-aberto');
                     elSaldo.innerText = 'R$ ' + acc.saldo_aberto.toLocaleString('pt-BR', {minimumFractionDigits: 2});
-                    elSaldo.className = acc.saldo_aberto >= 0 ? "text-lg font-bold text-emerald-400" : "text-lg font-bold text-rose-500";
+                    elSaldo.className = acc.saldo_aberto >= 0 ? "text-xl font-black font-mono text-emerald-400 mt-1 block" : "text-xl font-black font-mono text-rose-500 mt-1 block";
 
                     document.getElementById('stat-lucro-aberto').innerText = '+R$ ' + acc.lucro_aberto.toLocaleString('pt-BR', {minimumFractionDigits: 2});
                     document.getElementById('stat-perda-aberta').innerText = '-R$ ' + Math.abs(acc.perda_aberta).toLocaleString('pt-BR', {minimumFractionDigits: 2});
+
+                    // Atualiza o Badge de Decisão Rápida junto ao Botão Zerar Todas
+                    const pillSaldo = document.getElementById('quick-saldo-pill');
+                    const pillTexto = document.getElementById('quick-saldo-text');
+                    const btnCloseAll = document.getElementById('btn-close-all');
+
+                    if (acc.total_active > 0) {
+                        pillSaldo.classList.remove('hidden');
+                        btnCloseAll.disabled = false;
+                        btnCloseAll.classList.remove('opacity-50', 'cursor-not-allowed');
+
+                        const sinal = acc.saldo_aberto >= 0 ? '+' : '';
+                        pillTexto.innerText = `${sinal}R$ ${acc.saldo_aberto.toLocaleString('pt-BR', {minimumFractionDigits: 2})} (${sinal}${acc.pnl_aberto_perc.toFixed(2)}%)`;
+                        if (acc.saldo_aberto >= 0) {
+                            pillSaldo.className = "flex items-center gap-1.5 px-3 py-1 bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 rounded-lg text-xs font-mono font-bold animate-pulse";
+                        } else {
+                            pillSaldo.className = "flex items-center gap-1.5 px-3 py-1 bg-rose-500/10 border border-rose-500/30 text-rose-400 rounded-lg text-xs font-mono font-bold animate-pulse";
+                        }
+                    } else {
+                        pillSaldo.classList.add('hidden');
+                        btnCloseAll.disabled = true;
+                        btnCloseAll.classList.add('opacity-50', 'cursor-not-allowed');
+                    }
 
                     const resOrders = await fetch('/api/orders');
                     const orders = await resOrders.json();
@@ -430,11 +452,14 @@ def dashboard():
 
             function renderOrders(orders) {
                 const tbody = document.getElementById('orders-table-body');
+                const tfoot = document.getElementById('orders-table-foot');
                 tbody.innerHTML = '';
+                tfoot.innerHTML = '';
 
                 let filtered = [];
                 if (currentTab === 'active') {
                     filtered = orders.filter(o => o.status === 'FILLED' || o.status === 'SUBMITTED' || o.status === 'CLOSE_REQUESTED');
+                    globalActiveOrders = filtered;
                 } else if (currentTab === 'closed') {
                     filtered = orders.filter(o => o.status === 'CLOSED');
                 } else {
@@ -450,6 +475,10 @@ def dashboard():
                     return;
                 }
 
+                let sumLotes = 0;
+                let sumInvestido = 0;
+                let sumPnlBrl = 0;
+
                 filtered.forEach(o => {
                     const isCall = o.option_type === 'CALL';
                     const badgeType = isCall ?
@@ -464,11 +493,15 @@ def dashboard():
                     const pnlBrl = o.pnl_brl || ((pAtual - pCompra) * o.lots);
                     const pnlPerc = o.pnl_perc || (((pAtual - pCompra) / pCompra) * 100);
 
-                    const pnlClass = pnlBrl >= 0 ? "text-emerald-400 font-bold" : "text-rose-500 font-bold";
+                    sumLotes += o.lots;
+                    sumInvestido += o.invested_capital;
+                    sumPnlBrl += pnlBrl;
+
+                    const pnlClass = pnlBrl >= 0 ? "text-emerald-400 font-bold font-mono" : "text-rose-500 font-bold font-mono";
 
                     let actionHtml = '';
                     if (o.status === 'FILLED') {
-                        actionHtml = `<button onclick="closeSingle(${o.id})" class="px-2.5 py-1 bg-rose-600/80 hover:bg-rose-600 text-white font-bold text-xs rounded transition shadow">Zerar</button>`;
+                        actionHtml = `<button onclick="closeSingle(${o.id}, '${o.option_name}', ${pnlBrl})" class="px-2.5 py-1 bg-rose-600/80 hover:bg-rose-600 text-white font-bold text-xs rounded transition shadow">Zerar</button>`;
                     } else if (o.status === 'CLOSE_REQUESTED') {
                         actionHtml = `<span class="text-amber-400 text-xs font-semibold animate-pulse">Zerando...</span>`;
                     } else if (o.status === 'CLOSED') {
@@ -495,6 +528,26 @@ def dashboard():
                     `;
                     tbody.innerHTML += row;
                 });
+
+                // LINHA TOTALIZADORA NO RODAPÉ DA TABELA (DECISÃO CLARA)
+                if (currentTab === 'active' && filtered.length > 0) {
+                    const totalPnlPerc = sumInvestido > 0 ? ((sumPnlBrl / sumInvestido) * 100) : 0.0;
+                    const totalPnlClass = sumPnlBrl >= 0 ? "text-emerald-400 font-black font-mono text-sm" : "text-rose-500 font-black font-mono text-sm";
+
+                    tfoot.innerHTML = `
+                        <tr class="bg-gray-950/80 border-t-2 border-gray-700 font-bold text-xs">
+                            <td colspan="5" class="py-3 px-3 text-gray-300 uppercase tracking-wider font-mono">TOTAL DA CARTEIRA EM ABERTO</td>
+                            <td class="py-3 px-3 text-yellow-400 font-mono font-bold">${sumLotes}</td>
+                            <td colspan="2" class="py-3 px-3 text-right text-gray-400">Investido:</td>
+                            <td class="py-3 px-3 text-white font-mono">R$ ${sumInvestido.toFixed(2)}</td>
+                            <td class="py-3 px-3 ${totalPnlClass}">${totalPnlPerc >= 0 ? '+' : ''}${totalPnlPerc.toFixed(2)}%</td>
+                            <td class="py-3 px-3 ${totalPnlClass}">R$ ${sumPnlBrl >= 0 ? '+' : ''}${sumPnlBrl.toFixed(2)}</td>
+                            <td class="py-3 px-3 text-center">
+                                <span class="px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 border border-blue-500/30 text-[10px]">CONSOLIDADO</span>
+                            </td>
+                        </tr>
+                    `;
+                }
             }
 
             function setTab(tab) {
@@ -504,16 +557,38 @@ def dashboard():
                 loadOMSData();
             }
 
-            async function closeSingle(id) {
-                if (!confirm(`Deseja solicitar a ZERAGEM da posição #${id} no ProfitPro?`)) return;
+            async function closeSingle(id, optionName, pnl) {
+                const sinal = pnl >= 0 ? '+' : '';
+                const msg = `Confirma a ZERAGEM da posição ${optionName} (#${id})?\\n\\nSaldo a ser realizado: ${sinal}R$ ${pnl.toFixed(2)}`;
+                if (!confirm(msg)) return;
+
                 const res = await fetch(`/api/orders/${id}/close`, { method: 'POST' });
                 if (res.ok) loadOMSData();
             }
 
-            async function closeAll() {
-                if (!confirm('ATENÇÃO: Deseja solicitar a ZERAGEM DE TODAS as posições abertas na corretora?')) return;
+            async function closeAllWithDecision() {
+                const totalActive = currentAccountData.total_active || 0;
+                if (totalActive === 0) {
+                    alert('Nenhuma posição aberta no momento.');
+                    return;
+                }
+
+                const saldo = currentAccountData.saldo_aberto || 0;
+                const perc = currentAccountData.pnl_aberto_perc || 0;
+                const sinal = saldo >= 0 ? '+' : '';
+
+                const confirmMsg = `🚨 CONFIRMAÇÃO DE ZERAGEM COLETIVA 🚨\\n\\n` +
+                    `Quantidade de posições abertas: ${totalActive}\\n` +
+                    `SALDO ABERTO TOTAL: ${sinal}R$ ${saldo.toLocaleString('pt-BR', {minimumFractionDigits: 2})} (${sinal}${perc.toFixed(2)}%)\\n\\n` +
+                    `Deseja realmente solicitar o encerramento imediato de TODAS as posições na Nelogica ProfitPro?`;
+
+                if (!confirm(confirmMsg)) return;
+
                 const res = await fetch('/api/orders/close-all', { method: 'POST' });
-                if (res.ok) loadOMSData();
+                if (res.ok) {
+                    alert('Comando de zeragem global transmitido com sucesso!');
+                    loadOMSData();
+                }
             }
 
             function triggerBackup() {
@@ -531,8 +606,6 @@ def dashboard():
                 if (res.ok) {
                     alert('Backup restaurado com sucesso!');
                     loadOMSData();
-                } else {
-                    alert('Falha ao restaurar arquivo.');
                 }
             }
 
@@ -560,7 +633,19 @@ def dashboard():
                     </div>
                 </div>
 
-                <div class="flex items-center gap-2 flex-wrap">
+                <!-- CONTROLES COM PILULA DE SALDO EM TEMPO REAL -->
+                <div class="flex items-center gap-2.5 flex-wrap">
+                    <!-- Pill do Saldo em Aberto para Decisão Imediata -->
+                    <div id="quick-saldo-pill" class="hidden">
+                        <i class="fa-solid fa-scale-balanced"></i>
+                        <span>Saldo Aberto:</span>
+                        <span id="quick-saldo-text" class="font-bold">R$ 0,00</span>
+                    </div>
+
+                    <button id="btn-close-all" onclick="closeAllWithDecision()" class="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold rounded-lg transition shadow-lg shadow-rose-600/30 flex items-center gap-1.5">
+                        <i class="fa-solid fa-triangle-exclamation"></i> Zerar Todas
+                    </button>
+
                     <button onclick="triggerBackup()" class="px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs font-semibold rounded-lg border border-gray-700 transition flex items-center gap-1.5 shadow-sm">
                         <i class="fa-solid fa-download"></i> Backup
                     </button>
@@ -568,9 +653,7 @@ def dashboard():
                         <i class="fa-solid fa-upload"></i> Restaurar
                         <input type="file" accept=".json" onchange="handleRestore(event)" class="hidden">
                     </label>
-                    <button onclick="closeAll()" class="px-3.5 py-1.5 bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold rounded-lg transition shadow-lg shadow-rose-600/30 flex items-center gap-1.5">
-                        <i class="fa-solid fa-triangle-exclamation"></i> Zerar Todas
-                    </button>
+
                     <div class="flex items-center gap-2 pl-3 border-l border-gray-800">
                         <span class="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
                         <span class="text-xs text-emerald-400 font-bold font-mono">LIVE FEED</span>
@@ -578,7 +661,7 @@ def dashboard():
                 </div>
             </div>
 
-            <!-- CARDS DE MÉTRICAS INSTITUCIONAIS -->
+            <!-- CARDS DE MÉTRICAS -->
             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
                 <div class="bg-gray-900/60 border border-gray-800 p-4 rounded-xl">
                     <span class="text-[11px] font-bold text-gray-400 uppercase tracking-wider block">Conta Corretora</span>
@@ -592,8 +675,9 @@ def dashboard():
                     <span class="text-[11px] text-gray-500 mt-1 block">Alocado: <span id="acc-invested" class="text-gray-300 font-semibold">R$ 0,00</span></span>
                 </div>
 
-                <div class="bg-gray-900/60 border border-gray-800 p-4 rounded-xl">
-                    <span class="text-[11px] font-bold text-gray-400 uppercase tracking-wider block">Resultado Aberto (PnL)</span>
+                <!-- Card Central de Saldo em Aberto -->
+                <div class="bg-gray-900/60 border border-gray-800 p-4 rounded-xl relative overflow-hidden">
+                    <span class="text-[11px] font-bold text-gray-400 uppercase tracking-wider block">Saldo Aberto (PnL)</span>
                     <span id="stat-saldo-aberto" class="text-xl font-black font-mono mt-1 block">R$ 0,00</span>
                     <div class="flex justify-between text-[10px] text-gray-400 mt-1">
                         <span id="stat-lucro-aberto" class="text-emerald-400">+R$ 0,00</span>
@@ -610,11 +694,11 @@ def dashboard():
                 <div class="bg-gray-900/60 border border-gray-800 p-4 rounded-xl">
                     <span class="text-[11px] font-bold text-gray-400 uppercase tracking-wider block">Uptime do Servidor</span>
                     <span id="acc-uptime" class="text-lg font-bold text-purple-300 font-mono mt-1 block">0h 0m</span>
-                    <span class="text-[11px] text-emerald-400 font-semibold mt-1 block"><i class="fa-solid fa-bolt"></i> OMS 100% Online</span>
+                    <span class="text-[11px] text-emerald-400 font-semibold mt-1 block"><i class="fa-solid fa-bolt"></i> Conectado</span>
                 </div>
             </div>
 
-            <!-- TABELA COM ABAS -->
+            <!-- TABELA COM TOTALIZADOR DECISÓRIO NO FOOTER -->
             <div class="bg-gray-900/60 border border-gray-800 rounded-2xl overflow-hidden shadow-2xl">
                 <div class="border-b border-gray-800 px-6 pt-4 flex gap-6 text-sm font-bold">
                     <button id="tab-active" onclick="setTab('active')" class="tab-btn pb-3 border-b-2 border-transparent text-gray-400 hover:text-white transition flex items-center gap-2">
@@ -649,6 +733,9 @@ def dashboard():
                         <tbody id="orders-table-body" class="divide-y divide-gray-800/40">
                             <!-- Injetado via Javascript -->
                         </tbody>
+                        <tfoot id="orders-table-foot">
+                            <!-- Linha de Fechamento Consolidado da Carteira -->
+                        </tfoot>
                     </table>
                 </div>
             </div>
