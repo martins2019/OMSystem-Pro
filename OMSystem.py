@@ -156,7 +156,7 @@ def receive_order(payload: OrderPayload, db: Session = Depends(get_db)):
         preco_exec = payload.real_price if (payload.real_price and payload.real_price > 0) else payload.price
         inv_cap = payload.invested_capital if (payload.invested_capital and payload.invested_capital > 0) else (lote * preco_exec)
 
-        # Se for comando de fechamento do robô
+        # Comando de encerramento
         if raw_action in ("EXIT_REQUESTED", "CLOSE", "CLOSED", "EXIT") or raw_status in ("CLOSED", "EXIT_REQUESTED"):
             pos_existente = db.query(OrderModel).filter(
                 OrderModel.option_name == raw_option,
@@ -175,7 +175,7 @@ def receive_order(payload: OrderPayload, db: Session = Depends(get_db)):
                 db.commit()
                 return {"status": "success", "message": f"Posição {raw_option} marcada como ENCERRADA.", "order_id": pos_existente.id}
 
-        # Atualização de SUBMITTED para FILLED
+        # Atualização SUBMITTED para FILLED
         ordem_existente = db.query(OrderModel).filter(
             OrderModel.option_name == raw_option,
             OrderModel.status == "SUBMITTED"
@@ -234,7 +234,7 @@ def receive_order(payload: OrderPayload, db: Session = Depends(get_db)):
 
 @app.post("/webhook/market-update")
 def update_market_quotes(payload: MarketUpdatePayload, db: Session = Depends(get_db)):
-    """Atualização contínua de cotações a mercado."""
+    """Atualização contínua de cotações enviada pelo ProfitPro local."""
     updated = 0
     for item in payload.quotes:
         pos = db.query(OrderModel).filter(
@@ -251,7 +251,6 @@ def update_market_quotes(payload: MarketUpdatePayload, db: Session = Depends(get
 
 @app.get("/api/commands/pending")
 def get_pending_commands(db: Session = Depends(get_db)):
-    """Comandos consumidos pelos robôs executores."""
     pedidos = db.query(OrderModel).filter(OrderModel.status == "CLOSE_REQUESTED").all()
     return [{"order_id": o.id, "option": o.option_name, "action": "CLOSE", "volume": o.lots} for o in pedidos]
 
@@ -411,7 +410,6 @@ def dashboard():
                     document.getElementById('acc-winrate').innerText = acc.win_rate.toFixed(1) + '%';
                     document.getElementById('acc-uptime').innerText = acc.uptime;
 
-                    // Saldo no Card Principal
                     const elSaldo = document.getElementById('stat-saldo-aberto');
                     elSaldo.innerText = 'R$ ' + acc.saldo_aberto.toLocaleString('pt-BR', {minimumFractionDigits: 2});
                     elSaldo.className = acc.saldo_aberto >= 0 ? "text-xl font-black font-mono text-emerald-400 mt-1 block" : "text-xl font-black font-mono text-rose-500 mt-1 block";
@@ -419,7 +417,6 @@ def dashboard():
                     document.getElementById('stat-lucro-aberto').innerText = '+R$ ' + acc.lucro_aberto.toLocaleString('pt-BR', {minimumFractionDigits: 2});
                     document.getElementById('stat-perda-aberta').innerText = '-R$ ' + Math.abs(acc.perda_aberta).toLocaleString('pt-BR', {minimumFractionDigits: 2});
 
-                    // Atualiza o Badge de Decisão Rápida junto ao Botão Zerar Todas
                     const pillSaldo = document.getElementById('quick-saldo-pill');
                     const pillTexto = document.getElementById('quick-saldo-text');
                     const btnCloseAll = document.getElementById('btn-close-all');
@@ -529,7 +526,6 @@ def dashboard():
                     tbody.innerHTML += row;
                 });
 
-                // LINHA TOTALIZADORA NO RODAPÉ DA TABELA (DECISÃO CLARA)
                 if (currentTab === 'active' && filtered.length > 0) {
                     const totalPnlPerc = sumInvestido > 0 ? ((sumPnlBrl / sumInvestido) * 100) : 0.0;
                     const totalPnlClass = sumPnlBrl >= 0 ? "text-emerald-400 font-black font-mono text-sm" : "text-rose-500 font-black font-mono text-sm";
@@ -619,7 +615,6 @@ def dashboard():
     <body class="bg-[#0b0f19] text-gray-100 font-sans antialiased min-h-screen p-4 md:p-8">
         <div class="max-w-7xl mx-auto space-y-6">
 
-            <!-- HEADER PRINCIPAL -->
             <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-gray-900/60 border border-gray-800 p-5 rounded-2xl backdrop-blur-xl shadow-2xl">
                 <div>
                     <div class="flex items-center gap-3">
@@ -633,9 +628,7 @@ def dashboard():
                     </div>
                 </div>
 
-                <!-- CONTROLES COM PILULA DE SALDO EM TEMPO REAL -->
                 <div class="flex items-center gap-2.5 flex-wrap">
-                    <!-- Pill do Saldo em Aberto para Decisão Imediata -->
                     <div id="quick-saldo-pill" class="hidden">
                         <i class="fa-solid fa-scale-balanced"></i>
                         <span>Saldo Aberto:</span>
@@ -661,7 +654,6 @@ def dashboard():
                 </div>
             </div>
 
-            <!-- CARDS DE MÉTRICAS -->
             <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
                 <div class="bg-gray-900/60 border border-gray-800 p-4 rounded-xl">
                     <span class="text-[11px] font-bold text-gray-400 uppercase tracking-wider block">Conta Corretora</span>
@@ -675,7 +667,6 @@ def dashboard():
                     <span class="text-[11px] text-gray-500 mt-1 block">Alocado: <span id="acc-invested" class="text-gray-300 font-semibold">R$ 0,00</span></span>
                 </div>
 
-                <!-- Card Central de Saldo em Aberto -->
                 <div class="bg-gray-900/60 border border-gray-800 p-4 rounded-xl relative overflow-hidden">
                     <span class="text-[11px] font-bold text-gray-400 uppercase tracking-wider block">Saldo Aberto (PnL)</span>
                     <span id="stat-saldo-aberto" class="text-xl font-black font-mono mt-1 block">R$ 0,00</span>
@@ -698,7 +689,6 @@ def dashboard():
                 </div>
             </div>
 
-            <!-- TABELA COM TOTALIZADOR DECISÓRIO NO FOOTER -->
             <div class="bg-gray-900/60 border border-gray-800 rounded-2xl overflow-hidden shadow-2xl">
                 <div class="border-b border-gray-800 px-6 pt-4 flex gap-6 text-sm font-bold">
                     <button id="tab-active" onclick="setTab('active')" class="tab-btn pb-3 border-b-2 border-transparent text-gray-400 hover:text-white transition flex items-center gap-2">
@@ -731,10 +721,8 @@ def dashboard():
                             </tr>
                         </thead>
                         <tbody id="orders-table-body" class="divide-y divide-gray-800/40">
-                            <!-- Injetado via Javascript -->
                         </tbody>
                         <tfoot id="orders-table-foot">
-                            <!-- Linha de Fechamento Consolidado da Carteira -->
                         </tfoot>
                     </table>
                 </div>
